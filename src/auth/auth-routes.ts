@@ -1,7 +1,9 @@
 import { elizaLogger, IAgentRuntime } from "@elizaos/core";
 import { AuthService, type LoginRequest, type RegisterRequest } from './auth-service.ts';
 import { UserDatabase } from '../database/users.ts';
-
+import * as crypto from "crypto";
+import * as bcrypt from "bcryptjs";
+import { sendPasswordResetEmail } from "../email/resend";
 export class AuthRoutes {
   private authService: AuthService;
   private userDb: UserDatabase;
@@ -87,7 +89,88 @@ export class AuthRoutes {
       };
     }
   }
-
+  async handleForgotPassword(body: any): Promise<{ status: number; data: any }> {
+    try {
+      const email = (body?.email || "").toString().trim().toLowerCase();
+      if (!email) {
+        return { status: 400, data: { success: false, message: "Email is required" } };
+      }
+  
+      // look up user (no enumeration)
+      const user = await this.userDb.findUserByEmailCI(email);
+  
+      if (user?.id) {
+        const rawToken = crypto.randomBytes(32).toString("hex");
+        const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+        const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+        await this.userDb.createPasswordResetToken(user.id, tokenHash, expiresAt);
+  
+        const base = process.env.PASSWORD_RESET_URL || "https://eliza-frontend-one.vercel.app/reset-password";
+        const link = `${base}?token=${rawToken}`;
+  
+        // >>> ADD THESE 3 LINES HERE <<<
+        elizaLogger.info(`[Forgot] sending reset email to ${email}`);
+        const sendResult = await sendPasswordResetEmail(email, link);
+        elizaLogger.info(`[Forgot] send result: ${JSON.stringify(sendResult)}`);
+  
+        // dev safety net so you can finish even if email is filtered
+        if (process.env.NODE_ENV !== "production") {
+          elizaLogger.info(`[DEV] reset link for ${email}: ${link}`);
+        }
+      }
+  
+      return {
+        status: 200,
+        data: { success: true, message: "If an account exists for that email, a reset link has been sent." },
+      };
+    } catch (err) {
+      elizaLogger.error("Forgot password error:", err);
+      return { status: 500, data: { success: false, message: "Internal server error" } };
+    }
+  }
+  
+  
+  
+  /** POST /auth/reset-password  { token, password } */
+  async handleResetPassword(body: any): Promise<{ status: number; data: any }> {
+    try {
+      const token = (body?.token || "").toString();
+      const password = (body?.password || "").toString();
+  
+      if (!token || !password) {
+        return {
+          status: 400,
+          data: { success: false, message: "Token and password are required" },
+        };
+      }
+      if (password.length < 8) {
+        return {
+          status: 400,
+          data: { success: false, message: "Password must be at least 8 characters" },
+        };
+      }
+  
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+      const row = await this.userDb.findValidPasswordResetToken(tokenHash);
+      if (!row?.user_id) {
+        return {
+          status: 400,
+          data: { success: false, message: "Invalid or expired reset link" },
+        };
+      }
+  
+      const userId = String(row.user_id);
+      const hashed = await bcrypt.hash(password, 10);
+  
+      await this.userDb.setUserPassword(userId, hashed);
+      await this.userDb.markPasswordResetTokenConsumed(tokenHash);
+  
+      return { status: 200, data: { success: true } };
+    } catch (err) {
+      elizaLogger.error("Reset password error:", err);
+      return { status: 500, data: { success: false, message: "Internal server error" } };
+    }
+  }
   // Handle login endpoint
   async handleLogin(body: any): Promise<{ status: number; data: any }> {
     try {
@@ -189,9 +272,9 @@ export class AuthRoutes {
 
       elizaLogger.info(`Deleting conversation history for username: ${userId}`);
 
-      // First, find the actual account ID from the username
-      const account = await this.userDb.getAccountByUsername(userId);
-      if (!account) {
+      // First, find the actual user ID from the username
+      const user = await this.userDb.getUserByUsername(userId);
+      if (!user) {
         return {
           status: 404,
           data: {
@@ -201,8 +284,8 @@ export class AuthRoutes {
         };
       }
 
-      const actualUserId = account.id;
-      elizaLogger.info(`Found account ID: ${actualUserId} for username: ${userId}`);
+      const actualUserId = user.id;
+      elizaLogger.info(`Found user ID: ${actualUserId} for username: ${userId}`);
 
       // Use database adapter directly for bulk deletion
       const dbAdapter = this.runtime.databaseAdapter as any;
@@ -243,7 +326,7 @@ export class AuthRoutes {
           }
         }
 
-        elizaLogger.info(`Successfully deleted ${deletedCount} messages for user ${userId} (Account ID: ${actualUserId})`);
+        elizaLogger.info(`Successfully deleted ${deletedCount} messages for user ${userId} (ID: ${actualUserId})`);
 
         return {
           status: 200,

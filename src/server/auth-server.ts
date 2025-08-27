@@ -123,6 +123,18 @@ export class AuthServer {
         this.sendJsonResponse(res, result.status, result.data);
         return true;
       }
+      if (pathname === '/auth/forgot-password' && req.method === 'POST') {
+        const body = await this.parseBody(req);
+        const result = await this.authRoutes.handleForgotPassword(body);
+        this.sendJsonResponse(res, result.status, result.data);
+        return true;
+      }
+      if (pathname === '/auth/reset-password' && req.method === 'POST') {
+        const body = await this.parseBody(req);
+        const result = await this.authRoutes.handleResetPassword(body);
+        this.sendJsonResponse(res, result.status, result.data);
+        return true;
+      }
 
       // Comprehensive record endpoint
       if (pathname === '/auth/comprehensive-record' && req.method === 'GET') {
@@ -137,15 +149,15 @@ export class AuthServer {
         }
 
         try {
-          // First, get the actual account ID from the username
-          const account = await this.authRoutes.getUserDatabase().getAccountByUsername(username);
-          if (!account) {
+          // First, get the actual user ID from the username
+          const user = await this.authRoutes.getUserDatabase().getUserByUsername(username);
+          if (!user) {
             this.sendJsonResponse(res, 404, { success: false, message: 'User not found' });
             return true;
           }
 
-          const actualUserId = account.id;
-          elizaLogger.info(`Found account ID: ${actualUserId} for username: ${username}`);
+          const actualUserId = user.id;
+          elizaLogger.info(`Found user ID: ${actualUserId} for username: ${username}`);
 
           const userResponses = await getUserResponses(this.authRoutes.getRuntime(), {
             roomId,

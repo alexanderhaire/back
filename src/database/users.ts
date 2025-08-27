@@ -302,4 +302,105 @@ export class UserDatabase {
   private generateUserId(): string {
     return 'user_' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
   }
-} 
+
+
+async findUserByEmailCI(email: string): Promise<any | null> {
+  const sql = this.isPostgres
+    ? `SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`
+    : `SELECT * FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1`;
+
+  const row = await this.queryRow(sql, [email]);
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: row.username,
+    email: row.email,
+    password: row.password,
+    createdAt: row.created_at ? new Date(row.created_at) : undefined,
+    updatedAt: row.updated_at ? new Date(row.updated_at) : undefined,
+  };
+}
+
+/** Insert a password reset token (store only the hash) */
+async createPasswordResetToken(
+  userId: string,
+  tokenHash: string,
+  expiresAt: Date
+): Promise<void> {
+  if (this.isPostgres) {
+    const sql = `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+                 VALUES ($1, $2, $3)`;
+    await this.dbAdapter.query(sql, [userId, tokenHash, expiresAt]);
+  } else {
+    const sql = `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+                 VALUES (?, ?, ?)`;
+    const db = this.dbAdapter.db || this.dbAdapter;
+    if (db.prepare) db.prepare(sql).run(userId, tokenHash, expiresAt.toISOString());
+    else await db.run(sql, [userId, tokenHash, expiresAt.toISOString()]);
+  }
+}
+
+/** Fetch a valid (unconsumed, unexpired) token by its hash */
+async findValidPasswordResetToken(tokenHash: string): Promise<any | null> {
+  if (this.isPostgres) {
+    const sql = `SELECT * FROM password_reset_tokens
+                 WHERE token_hash=$1 AND consumed_at IS NULL AND expires_at > NOW()
+                 LIMIT 1`;
+    const result = await this.dbAdapter.query(sql, [tokenHash]);
+    return result.rows?.[0] || null;
+  } else {
+    const sql = `SELECT * FROM password_reset_tokens
+                 WHERE token_hash=? AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP
+                 LIMIT 1`;
+    const db = this.dbAdapter.db || this.dbAdapter;
+    if (db.prepare) return db.prepare(sql).get(tokenHash) || null;
+    if (db.get) return (await db.get(sql, [tokenHash])) || null;
+    return null;
+  }
+}
+
+/** Mark a token as consumed (single use) */
+async markPasswordResetTokenConsumed(tokenHash: string): Promise<void> {
+  if (this.isPostgres) {
+    const sql = `UPDATE password_reset_tokens SET consumed_at = NOW() WHERE token_hash = $1`;
+    await this.dbAdapter.query(sql, [tokenHash]);
+  } else {
+    const sql = `UPDATE password_reset_tokens SET consumed_at = CURRENT_TIMESTAMP WHERE token_hash = ?`;
+    const db = this.dbAdapter.db || this.dbAdapter;
+    if (db.prepare) db.prepare(sql).run(tokenHash);
+    else await db.run(sql, [tokenHash]);
+  }
+}
+
+/** Update the user's password; tries common column names */
+async setUserPassword(userId: string, newHash: string): Promise<void> {
+  const variants = this.isPostgres
+    ? [
+        [`UPDATE users SET password = $1 WHERE id = $2`, [newHash, userId]],
+        [`UPDATE users SET password_hash = $1 WHERE id = $2`, [newHash, userId]],
+        [`UPDATE users SET hashed_password = $1 WHERE id = $2`, [newHash, userId]],
+      ]
+    : [
+        [`UPDATE users SET password = ? WHERE id = ?`, [newHash, userId]],
+        [`UPDATE users SET password_hash = ? WHERE id = ?`, [newHash, userId]],
+        [`UPDATE users SET hashed_password = ? WHERE id = ?`, [newHash, userId]],
+      ];
+
+  for (const [sql, params] of variants) {
+    const res = this.isPostgres
+      ? await this.dbAdapter.query(sql as string, params as any[])
+      : await (() => {
+          const db = this.dbAdapter.db || this.dbAdapter;
+          if (db.prepare) return db.prepare(sql).run(...(params as any[]));
+          if (db.run) return db.run(sql, params);
+          return { changes: 0 };
+        })();
+
+    const affected = (res && (res.rowCount ?? res.changes ?? 0)) || 0;
+    if (affected > 0) return;
+  }
+  throw new Error("No password column on users table could be updated.");
+}
+
+// === /ADD ONLY ======================================================
+}
