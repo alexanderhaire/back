@@ -2237,8 +2237,6 @@ async function sendScheduleConfirmationEmail(
     scheduleTime: string,
     lovedOneTerm: string = "loved one"
   ): Promise<void> {
-    const { Resend } = await import('resend');
-    const resend = new Resend(process.env.RESEND_API_KEY!);
   
     const subject = "Your Grand Villa Tour is Scheduled!";
     const whenText = scheduleTime ? `${scheduleDate} at ${scheduleTime}` : scheduleDate;
