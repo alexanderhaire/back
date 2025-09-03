@@ -1,7 +1,8 @@
 import { Action, generateText, IAgentRuntime, Memory, ModelClass, State, HandlerCallback, elizaLogger } from "@elizaos/core";
 import { discoveryStateProvider, saveUserResponse, getUserResponses, updateUserStatus } from "../providers/discovery-state.js";
-import { Resend } from 'resend';
-const resend = new Resend(process.env.RESEND_API_KEY!);
+import { createVisitInvite } from "../visit/calendar_quick.js";
+
+
 
 // Simple global variable to track current responseStatus
 let currentResponseStatus = "Normal situation";
@@ -1989,7 +1990,53 @@ async function handleScheduleVisit(_runtime: IAgentRuntime, _message: Memory, _s
             const userName = await getUserFirstName(_runtime, _message);
             const contactInfo = await getContactInfo(_runtime, _message);
             const lovedOneName = contactInfo?.loved_one_name || "your loved one";
+            // ADD: normalize label -> concrete time & compute next occurrence
+            const [dayWord, ...restParts] = selectedTime.trim().split(/\s+/);
+            let timeText = restParts.join(" ");
+            if (/afternoon/i.test(timeText)) timeText = "3:00 PM";
+            else if (/morning/i.test(timeText)) timeText = "10:00 AM";
+            else if (/^(\d{1,2})(am|pm)$/i.test(timeText)) {
+              const m = timeText.match(/^(\d{1,2})(am|pm)$/i)!;
+              timeText = `${m[1]}:00 ${m[2].toUpperCase()}`;
+            } else if (/^(\d{1,2}):(\d{2})\s*(am|pm)$/i.test(timeText)) {
+              const m = timeText.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i)!;
+              timeText = `${m[1]}:${m[2]} ${m[3].toUpperCase()}`;
+            }
             
+            const targetDow = dayWord.toLowerCase().startsWith("wed") ? 3 : 5; // 0=Sun
+            const start = new Date();
+            { let delta = targetDow - start.getDay(); if (delta <= 0) delta += 7; start.setDate(start.getDate() + delta); }
+            const tm = timeText.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i)!;
+            let hh = +tm[1], mm = +tm[2]; const ap = tm[3].toUpperCase();
+            if (ap === "PM" && hh !== 12) hh += 12; if (ap === "AM" && hh === 12) hh = 0;
+            start.setHours(hh, mm, 0, 0);
+            const end = new Date(start.getTime() + 45 * 60 * 1000);
+            
+            // ADD: if we already have an email, create the Calendar invite (Google emails the invite)
+            const visitInfo = await getVisitInfo(_runtime, _message);
+            const toEmail = visitInfo?.email?.trim();
+            let eventId: string | undefined;
+            
+            if (toEmail) {
+              try {
+                const ev = await createVisitInvite(toEmail, start, end, true, process.env.TZ || "America/New_York");
+                eventId = ev.id;
+                elizaLogger.info(`✅ Calendar invite created: ${ev.htmlLink}`);
+              } catch (e) {
+                elizaLogger.error("❌ Calendar invite error", e);
+              }
+            }
+            
+            // OPTIONAL ADD: persist event id in your existing record style (no schema change)
+            if (eventId) {
+              await updateComprehensiveRecord(_runtime, _message, {
+                visit_scheduling: [{
+                  question: "Calendar event id",
+                  answer: eventId,
+                  timestamp: new Date().toISOString()
+                }]
+              });
+            }
             // Generate final confirmation response and END THE CONVERSATION
             const confirmationResponse = `Perfect${userName ? `, ${userName}` : ''}! ${selectedTime} works great for us. I'll send you a confirmation with all the details and directions. We're excited to show you and ${lovedOneName} around Grand Villa and let you experience what daily life would feel like here. Thank you for taking the time to share your story with me today. I look forward to meeting you and ${lovedOneName} soon!`;
             
@@ -2002,7 +2049,9 @@ async function handleScheduleVisit(_runtime: IAgentRuntime, _message: Memory, _s
                     metadata: {
                         stage: "schedule_visit",
                         visit_scheduled: true,
-                        selected_time: selectedTime
+                        selected_time: selectedTime,
+                        when_text: `${dayWord} at ${timeText}`,
+                        calendar_event_id: eventId || null,
                     }
                 }
             });
@@ -2094,7 +2143,7 @@ async function handleScheduleVisit(_runtime: IAgentRuntime, _message: Memory, _s
             return fallbackResponse;
         }
     }
-    
+
     // First interaction in schedule_visit stage - initial visit scheduling request
     const userName = await getUserFirstName(_runtime, _message);
     const contactInfo = await getContactInfo(_runtime, _message);
