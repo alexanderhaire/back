@@ -3,6 +3,7 @@ import { discoveryStateProvider, saveUserResponse, getUserResponses, updateUserS
 import { createVisitInvite } from "../visit/calendar_quick.js";
 
 
+
 // Simple global variable to track current responseStatus
 let currentResponseStatus = "Normal situation";
 
@@ -2054,6 +2055,29 @@ async function handleScheduleVisit(_runtime: IAgentRuntime, _message: Memory, _s
                     }
                 }
             });
+                        // === Try to send email immediately IF we already have an email on file ===
+                        try {
+                            const existingVisitInfo = await getVisitInfo(_runtime, _message);
+                            const emailToUse = existingVisitInfo?.email;
+            
+                            if (emailToUse) {
+                                // 'selectedTime' is like "Wednesday afternoon" or "Friday morning"
+                                const label = selectedTime || "";
+                                const parts = label.trim().split(/\s+/);
+                                const scheduleDate = parts.length >= 2 ? parts[0] : label;
+                                const scheduleTime = parts.length >= 2 ? parts.slice(1).join(" ") : "";
+            
+                                // Derive "mom"/"dad" from most recent user text (best effort)
+                                const lc = (_message.content.text || "").toLowerCase();
+                                let lovedOneTerm = "loved one";
+                                if (lc.includes("mom") || lc.includes("mother")) lovedOneTerm = "mom";
+                                else if (lc.includes("dad") || lc.includes("father")) lovedOneTerm = "dad";
+            
+                                await sendScheduleConfirmationEmail(emailToUse, scheduleDate, scheduleTime, lovedOneTerm);
+                            }
+                        } catch (err) {
+                            elizaLogger.error("❌ (early-send) Failed to send confirmation email", err);
+                        }
             
             elizaLogger.info(`🎉 CONVERSATION COMPLETE - Visit scheduled for ${selectedTime}`);
             return confirmationResponse; // EXIT HERE - Don't continue asking questions
@@ -2242,6 +2266,40 @@ async function handleAdditionalInfo(_runtime: IAgentRuntime, _message: Memory, _
                 // Update user status with visit information
                 const statusUpdate = `Visit info collected - Email: ${finalEmail}, Address: ${finalAddress}, Preferred Contact: ${finalPreference}`;
                 await updateUserStatus(_runtime, _message, statusUpdate);
+                                // === Send confirmation email now that we have all details ===
+                                try {
+                                    // Try to pull the last agent message; when the user picked a suggested slot earlier,
+                                    // we stored it as metadata.selected_time on that confirmation message.
+                                    const lastAgentMessage = await getLastAgentMessage(_runtime, _message);
+                                    const selectedLabel = (lastAgentMessage?.content?.metadata as any)?.selected_time as string | undefined;
+                
+                                    // Default phrasing if we can't cleanly parse a date/time
+                                    let scheduleDate = "the day we discussed";
+                                    let scheduleTime = "the time we discussed";
+                
+                                    if (selectedLabel) {
+                                        const parts = selectedLabel.trim().split(/\s+/);
+                                        if (parts.length >= 2) {
+                                            scheduleDate = parts[0];                 // e.g. "Wednesday"
+                                            scheduleTime = parts.slice(1).join(" ");  // e.g. "afternoon"
+                                        } else {
+                                            scheduleDate = selectedLabel; // e.g. "Wednesday"
+                                            scheduleTime = "";
+                                        }
+                                    }
+                
+                                    // Personalize "mom"/"dad" from the schedule-visit conversation text you already collected
+                                    const lowerContext = (allScheduleVisitText || "").toLowerCase();
+                                    let lovedOneTerm = "loved one";
+                                    if (lowerContext.includes("mom") || lowerContext.includes("mother")) lovedOneTerm = "mom";
+                                    else if (lowerContext.includes("dad") || lowerContext.includes("father")) lovedOneTerm = "dad";
+                                    else if (lowerContext.includes("grandma") || lowerContext.includes("grandmother")) lovedOneTerm = "grandma";
+                                    else if (lowerContext.includes("grandpa") || lowerContext.includes("grandfather")) lovedOneTerm = "grandpa";
+                
+                                    await sendScheduleConfirmationEmail(finalEmail, scheduleDate, scheduleTime, lovedOneTerm);
+                                } catch (err) {
+                                    elizaLogger.error("❌ Failed to send confirmation email via Resend", err);
+                                }
                 
                 // Get user name for personalized response
                 const userName = await getUserFirstName(_runtime, _message);
@@ -2391,7 +2449,40 @@ async function updateDiscoveryState(_runtime: IAgentRuntime, _message: Memory, s
         elizaLogger.info(`Added response to message history without stage change`);
     }
 }
-
+// === Email utility (Resend) ===
+// We use a dynamic import so you don't have to touch top-of-file imports (keeps line numbers stable).
+// If you prefer static import, see the note below.
+async function sendScheduleConfirmationEmail(
+    toEmail: string,
+    scheduleDate: string,
+    scheduleTime: string,
+    lovedOneTerm: string = "loved one"
+  ): Promise<void> {
+  
+    const subject = "Your Grand Villa Tour is Scheduled!";
+    const whenText = scheduleTime ? `${scheduleDate} at ${scheduleTime}` : scheduleDate;
+  
+    const emailHtml = `
+      <p>Hi there,</p>
+      <p>We are excited to show you around Grand Villa on <strong>${whenText}</strong>. We believe your ${lovedOneTerm} will love it here, and we can't wait to meet you both and give you a tour of our community.</p>
+      <p>Thank you for taking this step with us. If you have any questions or need to reschedule, please let us know. We're here to help make this experience as smooth and informative as possible for you and your family.</p>
+      <p>Sincerely,<br/> The Grand Villa Team</p>
+    `;
+  
+    try {
+      const { data, error } = await resend.emails.send({
+        from: process.env.RESEND_FROM!, // e.g. "Grand Villa Scheduler <scheduler@43saas.us.kg>"
+        to: [toEmail],
+        subject,
+        html: emailHtml,
+      });
+      if (error) throw error;
+      elizaLogger.info(`✅ Confirmation email sent via Resend (email ID: ${data?.id})`);
+    } catch (err) {
+      elizaLogger.error("❌ Failed to send confirmation email", err);
+    }
+  }
+  
 async function determineConversationStage(_runtime: IAgentRuntime, _message: Memory, discoveryState: any): Promise<string> {
     elizaLogger.info(`Determining conversation stage with state: ${JSON.stringify(discoveryState)}`);
     
